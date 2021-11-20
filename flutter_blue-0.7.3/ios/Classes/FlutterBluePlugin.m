@@ -38,6 +38,12 @@ typedef NS_ENUM(NSUInteger, LogLevel) {
 @property(nonatomic) NSMutableArray *servicesThatNeedDiscovered;
 @property(nonatomic) NSMutableArray *characteristicsThatNeedDiscovered;
 @property(nonatomic) LogLevel logLevel;
+
+// 用来存储第一次 获取状态时候 代理回调后 再去更新
+@property (nonatomic, strong) FlutterResult stateResult;
+// 注意在只有在 hand state中 才回初始化self.centralManager; 所以使用的时候 需要先初始化state
+@property (nonatomic, assign) CBManagerState cbState;
+@property (nonatomic, assign) BOOL cbStateValue; // 是否有值
 @end
 
 @implementation FlutterBluePlugin
@@ -47,8 +53,9 @@ typedef NS_ENUM(NSUInteger, LogLevel) {
                                    binaryMessenger:[registrar messenger]];
   FlutterEventChannel* stateChannel = [FlutterEventChannel eventChannelWithName:NAMESPACE @"/state" binaryMessenger:[registrar messenger]];
   FlutterBluePlugin* instance = [[FlutterBluePlugin alloc] init];
+  instance.cbStateValue = NO;
   instance.channel = channel;
-  instance.centralManager = [[CBCentralManager alloc] initWithDelegate:instance queue:nil];
+  //instance.centralManager;//默认初始化一次
   instance.scannedPeripherals = [NSMutableDictionary new];
   instance.servicesThatNeedDiscovered = [NSMutableArray new];
   instance.characteristicsThatNeedDiscovered = [NSMutableArray new];
@@ -62,22 +69,46 @@ typedef NS_ENUM(NSUInteger, LogLevel) {
   [registrar addMethodCallDelegate:instance channel:channel];
 }
 
+#pragma mark - getter
+- (CBCentralManager *)centralManager{
+    if (_centralManager == nil) {
+        NSDictionary *options = @{CBCentralManagerOptionShowPowerAlertKey:@NO};//不弹窗（配置）
+        _centralManager = [[CBCentralManager alloc] initWithDelegate:self queue:nil options:options];
+    }
+    return _centralManager;
+}
+#pragma mark -
+
 - (void)handleMethodCall:(FlutterMethodCall*)call result:(FlutterResult)result {
   if ([@"setLogLevel" isEqualToString:call.method]) {
     NSNumber *logLevelIndex = [call arguments];
     _logLevel = (LogLevel)[logLevelIndex integerValue];
     result(nil);
   } else if ([@"state" isEqualToString:call.method]) {
-    FlutterStandardTypedData *data = [self toFlutterData:[self toBluetoothStateProto:self->_centralManager.state]];
-    result(data);
+    FlutterStandardTypedData *data = [self toFlutterData:[self toBluetoothStateProto:self.cbState]];
+    if (self.cbStateValue) {
+        result(data);
+    }else {
+        self.stateResult = result;
+        // 初始化一下 centralManager 来获取回调
+        self.centralManager;
+    }
+    
+    // 超时的话 也处理一下
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if(self.stateResult){
+            self.stateResult(data);
+            self.stateResult = nil;
+        }
+    });
   } else if([@"isAvailable" isEqualToString:call.method]) {
-    if(self.centralManager.state != CBManagerStateUnsupported && self.centralManager.state != CBManagerStateUnknown) {
+    if(self.cbState != CBManagerStateUnsupported && self.cbState != CBManagerStateUnknown) {
       result(@(YES));
     } else {
       result(@(NO));
     }
   } else if([@"isOn" isEqualToString:call.method]) {
-    if(self.centralManager.state == CBManagerStatePoweredOn) {
+    if(self.cbState == CBManagerStatePoweredOn) {
       result(@(YES));
     } else {
       result(@(NO));
@@ -361,8 +392,14 @@ typedef NS_ENUM(NSUInteger, LogLevel) {
 // CBCentralManagerDelegate methods
 //
 - (void)centralManagerDidUpdateState:(nonnull CBCentralManager *)central {
+    self.cbState = central.state;
+    self.cbStateValue = true;
+    FlutterStandardTypedData *data = [self toFlutterData:[self toBluetoothStateProto:self.cbState]];
+    if (self.stateResult) {
+        self.stateResult(data);
+        self.stateResult = nil;
+    }
   if(_stateStreamHandler.sink != nil) {
-    FlutterStandardTypedData *data = [self toFlutterData:[self toBluetoothStateProto:self->_centralManager.state]];
     self.stateStreamHandler.sink(data);
   }
 }
